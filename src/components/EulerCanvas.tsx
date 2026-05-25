@@ -1,18 +1,15 @@
+import * as FileSystem from 'expo-file-system';
 import React, { useCallback, useRef, useState } from 'react';
-import {
-  PanResponder,
-  StyleSheet,
-  View,
-  type GestureResponderEvent,
-} from 'react-native';
+import { PanResponder, StyleSheet, View, type GestureResponderEvent } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
-import { BoundingBox, Point, StrokeLine } from '../types';
 import { UNDERLINE_COLORS } from '../constants/colors';
+import { BoundingBox, Point, StrokeLine } from '../types';
 
 interface EulerCanvasProps {
   flaggedLineId: string | null;
   confirmedErrorLineId: string | null;
+  correctLineId: string | null;
   onStrokeComplete: (line: StrokeLine, canvasBase64: string) => void;
 }
 
@@ -41,59 +38,42 @@ function isCrossOutGesture(bbox: BoundingBox, pointCount: number): boolean {
 function pointsToSvgPath(points: Point[]): string {
   if (points.length < 2) return '';
   const [first, ...rest] = points;
-  const move = `M ${first.x} ${first.y}`;
-  const lines = rest.map((p) => `L ${p.x} ${p.y}`).join(' ');
-  return `${move} ${lines}`;
+  return `M ${first.x} ${first.y} ` + rest.map((p) => `L ${p.x} ${p.y}`).join(' ');
 }
 
-function clusterIntoExistingLine(
-  points: Point[],
-  existingLines: StrokeLine[],
-): string | null {
+function clusterIntoExistingLine(points: Point[], existingLines: StrokeLine[]): string | null {
   if (points.length === 0) return null;
   const avgY = points.reduce((sum, p) => sum + p.y, 0) / points.length;
   for (const line of existingLines) {
     const lineAvgY = line.points.reduce((sum, p) => sum + p.y, 0) / line.points.length;
-    if (Math.abs(avgY - lineAvgY) < LINE_CLUSTER_THRESHOLD) {
-      return line.id;
-    }
+    if (Math.abs(avgY - lineAvgY) < LINE_CLUSTER_THRESHOLD) return line.id;
   }
   return null;
 }
 
 interface Stroke {
   id: string;
-  lineId: string;
   points: Point[];
   crossedOut: boolean;
 }
 
-export function EulerCanvas({
-  flaggedLineId,
-  confirmedErrorLineId,
-  onStrokeComplete,
-}: EulerCanvasProps) {
+export function EulerCanvas({ flaggedLineId, confirmedErrorLineId, correctLineId, onStrokeComplete }: EulerCanvasProps) {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [lines, setLines] = useState<StrokeLine[]>([]);
+  const linesRef = useRef<StrokeLine[]>([]);
   const activePointsRef = useRef<Point[]>([]);
   const viewShotRef = useRef<ViewShot>(null);
+  const captureScheduled = useRef(false);
 
   const captureCanvas = useCallback(async (): Promise<string> => {
     try {
       const uri = await viewShotRef.current?.capture?.();
       if (!uri) return '';
-      // react-native-view-shot returns a file URI; convert to base64
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      return await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const dataUrl = reader.result as string;
-          // strip the data:image/png;base64, prefix
-          resolve(dataUrl.split(',')[1] ?? '');
-        };
-        reader.readAsDataURL(blob);
+      // expo-file-system reads file:// URIs as base64 on device
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: 'base64' as const,
       });
+      return base64;
     } catch {
       return '';
     }
@@ -111,19 +91,10 @@ export function EulerCanvas({
     onPanResponderMove: (e: GestureResponderEvent) => {
       const { locationX, locationY } = e.nativeEvent;
       activePointsRef.current.push({ x: locationX, y: locationY, timestamp: Date.now() });
-      // Re-render the in-progress stroke
-      setStrokes((prev) => {
-        const existing = prev.filter((s) => s.id !== 'active');
-        return [
-          ...existing,
-          {
-            id: 'active',
-            lineId: 'active',
-            points: [...activePointsRef.current],
-            crossedOut: false,
-          },
-        ];
-      });
+      setStrokes((prev) => [
+        ...prev.filter((s) => s.id !== 'active'),
+        { id: 'active', points: [...activePointsRef.current], crossedOut: false },
+      ]);
     },
 
     onPanResponderRelease: async () => {
@@ -137,89 +108,70 @@ export function EulerCanvas({
       const bbox = computeBBox(pts);
       const crossedOut = isCrossOutGesture(bbox, pts.length);
       const strokeId = generateId();
-
-      // Cluster into an existing logical line or create a new one
-      const existingLineId = clusterIntoExistingLine(pts, lines);
+      const existingLineId = clusterIntoExistingLine(pts, linesRef.current);
       const lineId = existingLineId ?? generateId();
 
-      const newStroke: Stroke = { id: strokeId, lineId, points: pts, crossedOut };
-
+      const newStroke: Stroke = { id: strokeId, points: pts, crossedOut };
       setStrokes((prev) => [...prev.filter((s) => s.id !== 'active'), newStroke]);
 
-      // Build or merge the StrokeLine
-      const newLine: StrokeLine = {
-        id: lineId,
-        points: pts,
-        bbox,
-        crossedOut,
-        timestamp: Date.now(),
-      };
-
+      const newLine: StrokeLine = { id: lineId, points: pts, bbox, crossedOut, timestamp: Date.now() };
       const updatedLines = existingLineId
-        ? lines.map((l) =>
+        ? linesRef.current.map((l) =>
             l.id === existingLineId
-              ? {
-                  ...l,
-                  points: [...l.points, ...pts],
-                  bbox: computeBBox([...l.points, ...pts]),
-                }
+              ? { ...l, points: [...l.points, ...pts], bbox: computeBBox([...l.points, ...pts]) }
               : l,
           )
-        : [...lines, newLine];
+        : [...linesRef.current, newLine];
 
+      linesRef.current = updatedLines;
       setLines(updatedLines);
 
-      // Capture canvas snapshot after state settles
-      setTimeout(async () => {
-        const base64 = await captureCanvas();
-        onStrokeComplete(newLine, base64);
-      }, 50);
+      // Wait for SVG render to settle before capturing
+      if (!captureScheduled.current) {
+        captureScheduled.current = true;
+        setTimeout(async () => {
+          captureScheduled.current = false;
+          const base64 = await captureCanvas();
+          onStrokeComplete(newLine, base64);
+        }, 150);
+      }
     },
   });
 
   const getUnderlineColor = (lineId: string): string | null => {
     if (confirmedErrorLineId === lineId) return UNDERLINE_COLORS.error;
+    if (correctLineId === lineId) return UNDERLINE_COLORS.correct;
     if (flaggedLineId === lineId) return UNDERLINE_COLORS.flagged;
     return null;
   };
 
   return (
-    <ViewShot
-      ref={viewShotRef}
-      style={styles.container}
-      options={{ format: 'png', quality: 0.8 }}
-    >
+    <ViewShot ref={viewShotRef} style={styles.container} options={{ format: 'png', quality: 0.85 }}>
       <View style={styles.drawArea} {...panResponder.panHandlers}>
         <Svg style={StyleSheet.absoluteFill}>
           {strokes.map((stroke) => (
             <Path
               key={stroke.id}
               d={pointsToSvgPath(stroke.points)}
-              stroke={stroke.crossedOut ? '#AAAAAA' : '#1A1A1A'}
+              stroke={stroke.crossedOut ? '#BBBBBB' : '#1A1A1A'}
               strokeWidth={stroke.crossedOut ? 1.5 : 2.5}
               strokeLinecap="round"
               strokeLinejoin="round"
               fill="none"
-              opacity={stroke.crossedOut ? 0.4 : 1}
+              opacity={stroke.crossedOut ? 0.35 : 1}
             />
           ))}
         </Svg>
 
-        {/* Underline overlays */}
         {lines.map((line) => {
           const color = getUnderlineColor(line.id);
           if (!color) return null;
           return (
             <View
-              key={`underline_${line.id}`}
+              key={`ul_${line.id}`}
               style={[
                 styles.underline,
-                {
-                  left: line.bbox.x,
-                  top: line.bbox.y + line.bbox.height + 6,
-                  width: Math.max(line.bbox.width, 20),
-                  backgroundColor: color,
-                },
+                { left: line.bbox.x, top: line.bbox.y + line.bbox.height + 6, width: Math.max(line.bbox.width, 20), backgroundColor: color },
               ]}
             />
           );
@@ -230,16 +182,7 @@ export function EulerCanvas({
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FAFAF8',
-  },
-  drawArea: {
-    flex: 1,
-  },
-  underline: {
-    position: 'absolute',
-    height: 3,
-    borderRadius: 1.5,
-  },
+  container: { flex: 1, backgroundColor: '#FAFAF8' },
+  drawArea: { flex: 1 },
+  underline: { position: 'absolute', height: 3, borderRadius: 1.5 },
 });
