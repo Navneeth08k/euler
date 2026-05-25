@@ -1,5 +1,12 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import {
+  PanResponder,
+  StyleSheet,
+  View,
+  type GestureResponderEvent,
+} from 'react-native';
+import Svg, { Path } from 'react-native-svg';
+import ViewShot from 'react-native-view-shot';
 import { BoundingBox, Point, StrokeLine } from '../types';
 import { UNDERLINE_COLORS } from '../constants/colors';
 
@@ -17,10 +24,7 @@ function generateId(): string {
 
 function computeBBox(points: Point[]): BoundingBox {
   if (points.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
-  let minX = Infinity,
-    minY = Infinity,
-    maxX = -Infinity,
-    maxY = -Infinity;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of points) {
     if (p.x < minX) minX = p.x;
     if (p.y < minY) minY = p.y;
@@ -31,25 +35,37 @@ function computeBBox(points: Point[]): BoundingBox {
 }
 
 function isCrossOutGesture(bbox: BoundingBox, pointCount: number): boolean {
-  return pointCount < 15 && bbox.width > bbox.height * 3 && bbox.height < 20;
+  return pointCount >= 3 && bbox.width > bbox.height * 3 && bbox.height < 25;
 }
 
-function clusterIntoLine(
+function pointsToSvgPath(points: Point[]): string {
+  if (points.length < 2) return '';
+  const [first, ...rest] = points;
+  const move = `M ${first.x} ${first.y}`;
+  const lines = rest.map((p) => `L ${p.x} ${p.y}`).join(' ');
+  return `${move} ${lines}`;
+}
+
+function clusterIntoExistingLine(
   points: Point[],
   existingLines: StrokeLine[],
-): { lineId: string; isNew: boolean } {
-  if (points.length === 0) return { lineId: generateId(), isNew: true };
+): string | null {
+  if (points.length === 0) return null;
   const avgY = points.reduce((sum, p) => sum + p.y, 0) / points.length;
-
   for (const line of existingLines) {
-    const lineAvgY =
-      line.points.reduce((sum, p) => sum + p.y, 0) / line.points.length;
+    const lineAvgY = line.points.reduce((sum, p) => sum + p.y, 0) / line.points.length;
     if (Math.abs(avgY - lineAvgY) < LINE_CLUSTER_THRESHOLD) {
-      return { lineId: line.id, isNew: false };
+      return line.id;
     }
   }
+  return null;
+}
 
-  return { lineId: generateId(), isNew: true };
+interface Stroke {
+  id: string;
+  lineId: string;
+  points: Point[];
+  crossedOut: boolean;
 }
 
 export function EulerCanvas({
@@ -57,36 +73,109 @@ export function EulerCanvas({
   confirmedErrorLineId,
   onStrokeComplete,
 }: EulerCanvasProps) {
+  const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [lines, setLines] = useState<StrokeLine[]>([]);
-  const currentPointsRef = useRef<Point[]>([]);
-  const canvasRef = useRef<View>(null);
+  const activePointsRef = useRef<Point[]>([]);
+  const viewShotRef = useRef<ViewShot>(null);
 
-  const handleStrokeEnd = useCallback(
-    (strokePoints: Point[]) => {
-      if (strokePoints.length === 0) return;
+  const captureCanvas = useCallback(async (): Promise<string> => {
+    try {
+      const uri = await viewShotRef.current?.capture?.();
+      if (!uri) return '';
+      // react-native-view-shot returns a file URI; convert to base64
+      const response = await fetch(uri);
+      const blob = await response.blob();
+      return await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const dataUrl = reader.result as string;
+          // strip the data:image/png;base64, prefix
+          resolve(dataUrl.split(',')[1] ?? '');
+        };
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return '';
+    }
+  }, []);
 
-      const bbox = computeBBox(strokePoints);
-      const crossedOut = isCrossOutGesture(bbox, strokePoints.length);
+  const panResponder = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
 
-      const { lineId, isNew } = clusterIntoLine(strokePoints, lines);
+    onPanResponderGrant: (e: GestureResponderEvent) => {
+      const { locationX, locationY } = e.nativeEvent;
+      activePointsRef.current = [{ x: locationX, y: locationY, timestamp: Date.now() }];
+    },
 
+    onPanResponderMove: (e: GestureResponderEvent) => {
+      const { locationX, locationY } = e.nativeEvent;
+      activePointsRef.current.push({ x: locationX, y: locationY, timestamp: Date.now() });
+      // Re-render the in-progress stroke
+      setStrokes((prev) => {
+        const existing = prev.filter((s) => s.id !== 'active');
+        return [
+          ...existing,
+          {
+            id: 'active',
+            lineId: 'active',
+            points: [...activePointsRef.current],
+            crossedOut: false,
+          },
+        ];
+      });
+    },
+
+    onPanResponderRelease: async () => {
+      const pts = activePointsRef.current;
+      activePointsRef.current = [];
+      if (pts.length < 2) {
+        setStrokes((prev) => prev.filter((s) => s.id !== 'active'));
+        return;
+      }
+
+      const bbox = computeBBox(pts);
+      const crossedOut = isCrossOutGesture(bbox, pts.length);
+      const strokeId = generateId();
+
+      // Cluster into an existing logical line or create a new one
+      const existingLineId = clusterIntoExistingLine(pts, lines);
+      const lineId = existingLineId ?? generateId();
+
+      const newStroke: Stroke = { id: strokeId, lineId, points: pts, crossedOut };
+
+      setStrokes((prev) => [...prev.filter((s) => s.id !== 'active'), newStroke]);
+
+      // Build or merge the StrokeLine
       const newLine: StrokeLine = {
-        id: isNew ? lineId : generateId(),
-        points: strokePoints,
+        id: lineId,
+        points: pts,
         bbox,
         crossedOut,
         timestamp: Date.now(),
       };
 
-      const updatedLines = [...lines, newLine];
+      const updatedLines = existingLineId
+        ? lines.map((l) =>
+            l.id === existingLineId
+              ? {
+                  ...l,
+                  points: [...l.points, ...pts],
+                  bbox: computeBBox([...l.points, ...pts]),
+                }
+              : l,
+          )
+        : [...lines, newLine];
+
       setLines(updatedLines);
 
-      // In production this would capture the PencilKit canvas as base64
-      // For now we pass an empty string — the classifier handles missing images gracefully
-      onStrokeComplete(newLine, '');
+      // Capture canvas snapshot after state settles
+      setTimeout(async () => {
+        const base64 = await captureCanvas();
+        onStrokeComplete(newLine, base64);
+      }, 50);
     },
-    [lines, onStrokeComplete],
-  );
+  });
 
   const getUnderlineColor = (lineId: string): string | null => {
     if (confirmedErrorLineId === lineId) return UNDERLINE_COLORS.error;
@@ -95,46 +184,58 @@ export function EulerCanvas({
   };
 
   return (
-    <View ref={canvasRef} style={styles.container}>
-      {Platform.OS === 'ios' ? (
-        // PencilKit native view will go here
-        // For now, render a placeholder that shows the canvas area
-        <View style={styles.canvasPlaceholder} />
-      ) : (
-        <View style={styles.canvasPlaceholder} />
-      )}
+    <ViewShot
+      ref={viewShotRef}
+      style={styles.container}
+      options={{ format: 'png', quality: 0.8 }}
+    >
+      <View style={styles.drawArea} {...panResponder.panHandlers}>
+        <Svg style={StyleSheet.absoluteFill}>
+          {strokes.map((stroke) => (
+            <Path
+              key={stroke.id}
+              d={pointsToSvgPath(stroke.points)}
+              stroke={stroke.crossedOut ? '#AAAAAA' : '#1A1A1A'}
+              strokeWidth={stroke.crossedOut ? 1.5 : 2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              fill="none"
+              opacity={stroke.crossedOut ? 0.4 : 1}
+            />
+          ))}
+        </Svg>
 
-      {/* Underline overlays */}
-      {lines.map((line) => {
-        const color = getUnderlineColor(line.id);
-        if (!color) return null;
-        return (
-          <View
-            key={`underline_${line.id}`}
-            style={[
-              styles.underline,
-              {
-                left: line.bbox.x,
-                top: line.bbox.y + line.bbox.height + 4,
-                width: line.bbox.width,
-                backgroundColor: color,
-              },
-            ]}
-          />
-        );
-      })}
-    </View>
+        {/* Underline overlays */}
+        {lines.map((line) => {
+          const color = getUnderlineColor(line.id);
+          if (!color) return null;
+          return (
+            <View
+              key={`underline_${line.id}`}
+              style={[
+                styles.underline,
+                {
+                  left: line.bbox.x,
+                  top: line.bbox.y + line.bbox.height + 6,
+                  width: Math.max(line.bbox.width, 20),
+                  backgroundColor: color,
+                },
+              ]}
+            />
+          );
+        })}
+      </View>
+    </ViewShot>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    position: 'relative',
-  },
-  canvasPlaceholder: {
-    flex: 1,
     backgroundColor: '#FAFAF8',
+  },
+  drawArea: {
+    flex: 1,
   },
   underline: {
     position: 'absolute',
