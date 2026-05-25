@@ -1,8 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Hint, HintLadder, HintTier, Problem } from '../types';
 
 const HINT_COUNT = 25;
+const MODEL = 'gemini-2.5-flash';
 
 const TIER_CONFIG: { range: [number, number]; tier: HintTier; instruction: string }[] = [
   {
@@ -69,40 +70,40 @@ export async function generateHintLadder(
     return cached;
   }
 
-  const client = new Anthropic({ apiKey });
+  const ai = new GoogleGenAI({ apiKey });
   const hints: Hint[] = [];
 
   for (let i = 0; i < HINT_COUNT; i++) {
     const { tier, instruction } = getTierForIndex(i);
     const previousHints = hints.map((h) => `Hint ${h.index + 1}: ${h.text}`).join('\n');
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 150,
-      system: [
-        `You are Euler, a math tutor generating hint ${i + 1} of 25.`,
-        `Tier: ${tier} — ${instruction}`,
-        'Rules:',
-        '- Never give away the answer before hint 25',
-        '- Each hint must be slightly more revealing than the last',
-        '- Be warm and encouraging, never condescending',
-        '- Return ONLY the hint text, no preamble',
-      ].join('\n'),
-      messages: [
-        {
-          role: 'user',
-          content: [
-            `Problem: ${problem.text}`,
-            `Subject: ${problem.subject}`,
-            `Concept: ${problem.concept}`,
-            previousHints ? `\nPrevious hints given:\n${previousHints}` : '',
-          ].join('\n'),
-        },
-      ],
+    const systemInstruction = [
+      `You are Euler, a math tutor generating hint ${i + 1} of 25.`,
+      `Tier: ${tier} — ${instruction}`,
+      'Rules:',
+      '- Never give away the answer before hint 25',
+      '- Each hint must be slightly more revealing than the last',
+      '- Be warm and encouraging, never condescending',
+      '- Return ONLY the hint text, no preamble',
+    ].join('\n');
+
+    const userPrompt = [
+      `Problem: ${problem.text}`,
+      `Subject: ${problem.subject}`,
+      `Concept: ${problem.concept}`,
+      previousHints ? `\nPrevious hints given:\n${previousHints}` : '',
+    ].join('\n');
+
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      config: {
+        systemInstruction,
+        maxOutputTokens: 150,
+      },
+      contents: userPrompt,
     });
 
-    const text =
-      response.content[0].type === 'text' ? response.content[0].text : '';
+    const text = response.text ?? '';
 
     hints.push({
       index: i,

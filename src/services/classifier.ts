@@ -1,9 +1,10 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import { ClassificationResult, StrokeLine } from '../types';
 
 const SUSPICION_THRESHOLD = 0.35;
 const CONFIDENCE_THRESHOLD = 0.75;
 const PAUSE_DELAY_MS = 1800;
+const MODEL = 'gemini-2.5-flash';
 
 export function computeSuspicionScore(lines: StrokeLine[]): number {
   if (lines.length === 0) return 0;
@@ -55,7 +56,7 @@ export async function classifyWithVision(
   lines: StrokeLine[],
   apiKey: string,
 ): Promise<ClassificationResult> {
-  const client = new Anthropic({ apiKey });
+  const ai = new GoogleGenAI({ apiKey });
 
   const activeLines = lines.filter((l) => !l.crossedOut);
   const lineDescriptions = activeLines
@@ -65,38 +66,39 @@ export async function classifyWithVision(
     )
     .join('\n');
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 200,
-    system: [
-      "You are Euler's error detection engine. Analyze student handwritten math work.",
-      'Return ONLY valid JSON:',
-      '{',
-      '  "status": "correct_partial" | "arithmetic_error" | "concept_error" | "complete" | "unclear",',
-      '  "errorLineIndex": number | null,',
-      '  "errorType": string | null,',
-      '  "confidence": number',
-      '}',
-      'Rules:',
-      '- If confidence < 0.75, return status "unclear"',
-      '- Ignore crossed-out work entirely',
-      '- errorType: be specific ("forgot second product rule term", etc.)',
-      '- "complete" only when final answer is fully correct',
-    ].join('\n'),
-    messages: [
+  const systemInstruction = [
+    "You are Euler's error detection engine. Analyze student handwritten math work.",
+    'Return ONLY valid JSON with no markdown fences:',
+    '{',
+    '  "status": "correct_partial" | "arithmetic_error" | "concept_error" | "complete" | "unclear",',
+    '  "errorLineIndex": number | null,',
+    '  "errorType": string | null,',
+    '  "confidence": number',
+    '}',
+    'Rules:',
+    '- If confidence < 0.75, return status "unclear"',
+    '- Ignore crossed-out work entirely',
+    '- errorType: be specific ("forgot second product rule term", etc.)',
+    '- "complete" only when final answer is fully correct',
+  ].join('\n');
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    config: {
+      systemInstruction,
+      maxOutputTokens: 200,
+    },
+    contents: [
       {
         role: 'user',
-        content: [
+        parts: [
           {
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: 'image/png',
+            inlineData: {
+              mimeType: 'image/png',
               data: imageBase64,
             },
           },
           {
-            type: 'text',
             text: `Active stroke lines:\n${lineDescriptions}\n\nAnalyze the student's work and return the classification JSON.`,
           },
         ],
@@ -104,8 +106,7 @@ export async function classifyWithVision(
     ],
   });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-
+  const text = response.text ?? '{}';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     return { status: 'unclear', errorLineIndex: null, errorType: null, confidence: 0 };
