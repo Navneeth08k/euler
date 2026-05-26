@@ -11,7 +11,7 @@ interface UseSessionReturn {
   confirmedErrorLineId: string | null;
   correctLineId: string | null;
   onStrokeComplete: (line: StrokeLine, canvasBase64: string) => void;
-  onRequestHelp: () => void;
+  onRequestHelp: (freshBase64?: string) => void;
   unlockNextHint: () => void;
   resetSession: (problem: Problem) => void;
 }
@@ -133,8 +133,10 @@ export function useSession(problem: Problem, apiKey: string): UseSessionReturn {
     classifyTimeoutRef.current = setTimeout(runClassification, getPauseDelay());
   }, [runClassification]);
 
-  const onRequestHelp = useCallback(() => {
+  const onRequestHelp = useCallback((freshBase64?: string) => {
     if (classifyTimeoutRef.current) clearTimeout(classifyTimeoutRef.current);
+    // If a fresh capture was provided, update the ref so classifier sees it
+    if (freshBase64) latestBase64Ref.current = freshBase64;
     runClassification();
   }, [runClassification]);
 

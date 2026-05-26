@@ -155,7 +155,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   hintCardScroll: {
-    maxHeight: 200,
+    maxHeight: 320,
   },
   hintCard: {
     borderRadius: 10,

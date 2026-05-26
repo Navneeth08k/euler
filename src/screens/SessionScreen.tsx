@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Dimensions,
   Platform,
@@ -41,6 +41,7 @@ type SidebarTab = 'hints' | 'session';
 export function SessionScreen({ problem, apiKey, onBack }: SessionScreenProps) {
   const isTablet = useIsTablet();
   const [activeTab, setActiveTab] = useState<SidebarTab>('hints');
+  const captureRef = useRef<(() => Promise<string>) | null>(null);
 
   const {
     session,
@@ -52,6 +53,12 @@ export function SessionScreen({ problem, apiKey, onBack }: SessionScreenProps) {
     onRequestHelp,
     unlockNextHint,
   } = useSession(problem, apiKey);
+
+  const handleHelp = async () => {
+    // Capture a fresh snapshot so classifier always sees the current canvas
+    const freshBase64 = await captureRef.current?.() ?? '';
+    onRequestHelp(freshBase64);
+  };
 
   const statusColor =
     session.status === 'complete'
@@ -94,7 +101,7 @@ export function SessionScreen({ problem, apiKey, onBack }: SessionScreenProps) {
       <View style={styles.helpSection}>
         <Pressable
           style={[styles.helpButton, helpDisabled && styles.helpButtonDisabled]}
-          onPress={onRequestHelp}
+          onPress={handleHelp}
           disabled={helpDisabled}
         >
           <Text style={styles.helpButtonText}>I'm stuck — help</Text>
@@ -135,6 +142,7 @@ export function SessionScreen({ problem, apiKey, onBack }: SessionScreenProps) {
               flaggedLineId={flaggedLineId}
               confirmedErrorLineId={confirmedErrorLineId}
               correctLineId={null}
+              captureRef={captureRef}
               onStrokeComplete={onStrokeComplete}
             />
           </View>
@@ -208,7 +216,7 @@ export function SessionScreen({ problem, apiKey, onBack }: SessionScreenProps) {
             <View style={styles.helpSection}>
               <Pressable
                 style={[styles.helpButton, helpDisabled && styles.helpButtonDisabled]}
-                onPress={onRequestHelp}
+                onPress={handleHelp}
                 disabled={helpDisabled}
               >
                 <Text style={styles.helpButtonText}>I'm stuck — help</Text>

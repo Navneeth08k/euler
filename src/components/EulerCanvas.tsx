@@ -1,5 +1,5 @@
-import * as FileSystem from 'expo-file-system';
-import React, { useCallback, useRef, useState } from 'react';
+import * as FileSystem from 'expo-file-system/legacy';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View, type GestureResponderEvent } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
@@ -10,6 +10,7 @@ interface EulerCanvasProps {
   flaggedLineId: string | null;
   confirmedErrorLineId: string | null;
   correctLineId: string | null;
+  captureRef?: React.MutableRefObject<(() => Promise<string>) | null>;
   onStrokeComplete: (line: StrokeLine, canvasBase64: string) => void;
 }
 
@@ -32,7 +33,9 @@ function computeBBox(points: Point[]): BoundingBox {
 }
 
 function isCrossOutGesture(bbox: BoundingBox, pointCount: number): boolean {
-  return pointCount >= 3 && bbox.width > bbox.height * 3 && bbox.height < 25;
+  // Must be wide enough to span existing text (> 80px) and very flat (height < 20px).
+  // This prevents minus/subtraction signs (~20-40px wide) from being flagged as cross-outs.
+  return pointCount >= 4 && bbox.width > 80 && bbox.width > bbox.height * 5 && bbox.height < 20;
 }
 
 function pointsToSvgPath(points: Point[]): string {
@@ -57,7 +60,7 @@ interface Stroke {
   crossedOut: boolean;
 }
 
-export function EulerCanvas({ flaggedLineId, confirmedErrorLineId, correctLineId, onStrokeComplete }: EulerCanvasProps) {
+export function EulerCanvas({ flaggedLineId, confirmedErrorLineId, correctLineId, captureRef, onStrokeComplete }: EulerCanvasProps) {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [lines, setLines] = useState<StrokeLine[]>([]);
   const linesRef = useRef<StrokeLine[]>([]);
@@ -69,7 +72,6 @@ export function EulerCanvas({ flaggedLineId, confirmedErrorLineId, correctLineId
     try {
       const uri = await viewShotRef.current?.capture?.();
       if (!uri) return '';
-      // expo-file-system reads file:// URIs as base64 on device
       const base64 = await FileSystem.readAsStringAsync(uri, {
         encoding: 'base64' as const,
       });
@@ -78,6 +80,11 @@ export function EulerCanvas({ flaggedLineId, confirmedErrorLineId, correctLineId
       return '';
     }
   }, []);
+
+  // Expose captureCanvas to parent (used by "I'm stuck" button)
+  useEffect(() => {
+    if (captureRef) captureRef.current = captureCanvas;
+  }, [captureRef, captureCanvas]);
 
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,

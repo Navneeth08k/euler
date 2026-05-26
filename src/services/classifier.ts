@@ -26,7 +26,8 @@ export function computeSuspicionScore(lines: StrokeLine[]): number {
     if (timeBetween < 500 && Math.abs(latestLine.bbox.y - prev.bbox.y) < 30) score += 0.15;
   }
 
-  if (latestLine.points.length < 4 && latestLine.bbox.width > latestLine.bbox.height * 3) score += 0.1;
+  // Only flag wide flat strokes that are long enough to be cross-outs (not minus signs)
+  if (latestLine.points.length < 4 && latestLine.bbox.width > 80 && latestLine.bbox.width > latestLine.bbox.height * 5) score += 0.1;
 
   return Math.min(score, 1);
 }

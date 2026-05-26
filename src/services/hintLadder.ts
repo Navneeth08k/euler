@@ -43,7 +43,7 @@ function getTierForIndex(index: number): { tier: HintTier; instruction: string }
 }
 
 function storageKey(problemId: string): string {
-  return `euler_hints_v2_${problemId}`;
+  return `euler_hints_v3_${problemId}`;
 }
 
 export async function getCachedLadder(problemId: string): Promise<HintLadder | null> {
@@ -82,7 +82,7 @@ async function generateOneHint(
 
   const response = await ai.models.generateContent({
     model: MODEL,
-    config: { systemInstruction, maxOutputTokens: 150 },
+    config: { systemInstruction, maxOutputTokens: 350 },
     contents: userContent,
   });
 
